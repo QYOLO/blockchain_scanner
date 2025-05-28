@@ -1,0 +1,41 @@
+mysql:
+  host: "127.0.0.1"
+  port: 3306
+  database: "block_chain"
+  username: "root"
+  password: "12345678"
+  charset: "utf8mb4"
+  parse_time: true
+  loc: "Local"
+
+redis:
+  host: "127.0.0.1"
+  port: 6379
+  password: ""
+  db: 0
+
+chains:
+  - chain: "tron"
+    node_url: "https://api.zan.top/node/v1/tron/mainnet/9ff537cad4c74ce99443a4f74b52a3a7/jsonrpc"
+    enabled: true
+
+tokens:
+  - chain: "tron"
+    contract_address: "41A614F803B6FD780986A42C78EC9C7F77E6DED13C" # TRON USDT
+    symbol: "USDT"
+    decimals: 6
+    token_type: "trc20"
+    table_name: "tron_usdt_transactions"
+
+scanner:
+  start_block: 53000000  # 从更早的区块开始扫描
+  batch_size: 5  # 减小批量大小以降低API负载
+  concurrent_workers: 1  # 减少并发数以降低API负载
+  retry_times: 3
+  retry_interval: 5
+  scan_interval: 3  # 扫描间隔（秒）
+
+log:
+  level: "debug"  # 使用debug级别以查看更多信息
+  format: "json"
+  output: "stdout" 

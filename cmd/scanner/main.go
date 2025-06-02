@@ -21,7 +21,9 @@ func main() {
 	db := mustInitDB(logger)
 	scannerConfig, tokenConfig := loadChainAndTokenConfig(logger)
 
-	blockScanner := scanner.NewBlockScanner(logger, db, scannerConfig, tokenConfig)
+	progressStore := mustInitProgressStore(logger)
+
+	blockScanner := scanner.NewBlockScanner(logger, db, scannerConfig, tokenConfig, progressStore)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -98,6 +100,20 @@ func loadChainAndTokenConfig(logger *zap.Logger) (*scanner.Config, *scanner.Toke
 			Symbol:          tokenConfig.Symbol,
 			Decimals:        tokenConfig.Decimals,
 		}
+}
+
+func mustInitProgressStore(logger *zap.Logger) *storage.ProgressStore {
+	redisConfig := &storage.RedisConfig{
+		Host:     viper.GetString("redis.host"),
+		Port:     viper.GetInt("redis.port"),
+		Password: viper.GetString("redis.password"),
+		DB:       viper.GetInt("redis.db"),
+	}
+	client, err := storage.NewRedisConnection(redisConfig)
+	if err != nil {
+		logger.Fatal("Failed to connect to redis", zap.Error(err))
+	}
+	return storage.NewProgressStore(client)
 }
 
 func waitForShutdown(logger *zap.Logger, blockScanner *scanner.BlockScanner) {

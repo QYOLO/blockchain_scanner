@@ -13,8 +13,7 @@ import (
 )
 
 type Client struct {
-	httpClient *client.HttpClient
-	rpcClient  *client.RPCClient
+	rpcClient *client.RPCClient
 }
 
 // TronBlock 继承 models.BaseBlock
@@ -28,18 +27,6 @@ type TronBlock struct {
 
 // Transaction 继承 models.BaseTransaction
 type Transaction = models.OnchainTransaction
-
-type JSONRPCError struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
-}
-
-type JSONRPCResponse struct {
-	JSONRPC string          `json:"jsonrpc"`
-	ID      int             `json:"id"`
-	Result  json.RawMessage `json:"result"`
-	Error   *JSONRPCError   `json:"error,omitempty"`
-}
 
 // Log 事件日志结构
 type Log struct {
@@ -64,8 +51,7 @@ type TronLog struct {
 
 func NewClient(nodeURL string) *Client {
 	return &Client{
-		httpClient: client.NewHttpClient(nodeURL),
-		rpcClient:  client.NewRPCClient(nodeURL),
+		rpcClient: client.NewRPCClient(nodeURL),
 	}
 }
 
@@ -105,24 +91,6 @@ func (c *Client) GetLogs(ctx context.Context, filter map[string]interface{}) ([]
 	return logs, nil
 }
 
-// GetTransactionInfo 获取交易的详细信息
-func (c *Client) GetTransactionInfo(ctx context.Context, txID string) (map[string]interface{}, error) {
-	reqBody := map[string]string{
-		"value": txID,
-	}
-	resp, err := c.httpClient.Do(ctx, "POST", "/wallet/gettransactioninfobyid", &client.RequestOption{
-		Body: reqBody,
-	})
-	if err != nil {
-		return nil, err
-	}
-	var result map[string]interface{}
-	if err := json.Unmarshal(resp, &result); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal response: %v, body: %s", err, string(resp))
-	}
-	return result, nil
-}
-
 // ParseTRC20Transfer 解析TRC20代币转账事件
 func ParseTRC20Transfer(data string) (from, to string, amount *big.Int, err error) {
 	// 移除0x前缀
@@ -155,57 +123,4 @@ func ParseTRC20Transfer(data string) (from, to string, amount *big.Int, err erro
 
 	// 对于transfer方法，from地址是交易的发送者，在交易对象中，而不是在input数据中
 	return "", strings.ToUpper(to), amount, nil
-}
-
-// IsValidTronAddress 检查是否是有效的TRON地址
-func IsValidTronAddress(address string) bool {
-	address = strings.TrimPrefix(address, "0x")
-	// 确保有41前缀
-	if !strings.HasPrefix(address, "41") {
-		return false
-	}
-	address = strings.TrimPrefix(address, "41")
-	if len(address) != 40 {
-		return false
-	}
-	_, err := hex.DecodeString(address)
-	return err == nil
-}
-
-// ConvertToTronAddress 将以太坊格式地址转换为TRON格式
-func ConvertToTronAddress(ethAddress string) string {
-	addr := strings.TrimPrefix(ethAddress, "0x")
-	return "41" + addr
-}
-
-// ConvertToHexAddress 将TRON格式地址转换为以太坊格式
-func ConvertToHexAddress(tronAddress string) string {
-	addr := strings.TrimPrefix(tronAddress, "41")
-	return "0x" + addr
-}
-
-// NormalizeAddress 标准化地址格式
-func NormalizeAddress(address string) string {
-	address = strings.TrimPrefix(address, "0x")
-	address = strings.TrimPrefix(address, "41")
-	if len(address) > 40 {
-		address = address[len(address)-40:]
-	}
-	return "41" + strings.ToUpper(address)
-}
-
-// HexToInt64 将十六进制字符串转换为int64
-func HexToInt64(hex string) int64 {
-	hex = strings.TrimPrefix(hex, "0x")
-	n := new(big.Int)
-	n.SetString(hex, 16)
-	return n.Int64()
-}
-
-// HexToUint64 将十六进制字符串转换为uint64
-func HexToUint64(hex string) uint64 {
-	hex = strings.TrimPrefix(hex, "0x")
-	n := new(big.Int)
-	n.SetString(hex, 16)
-	return n.Uint64()
 }

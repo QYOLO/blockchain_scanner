@@ -1,0 +1,39 @@
+services:
+  redis:
+    image: redis:7.2
+    container_name: redis-dev
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+
+  doris-fe:
+    image: selectdb/doris:arm64-fe-latest
+    container_name: doris-fe
+    environment:
+      - FE_SERVERS=fe1:172.20.0.2:9010
+      - FE_ID=1
+    ports:
+      - "8030:8030"   # Doris Web UI
+      - "9030:9030"   # MySQL 协议端口
+    networks:
+      doris-net:
+        ipv4_address: 172.20.0.2
+
+  doris-be:
+    image: selectdb/doris:arm64-be-latest
+    container_name: doris-be
+    environment:
+      - FE_SERVERS=fe1:172.20.0.2:9010
+      - BE_ADDR=172.20.0.3:9050
+    depends_on:
+      - doris-fe
+    networks:
+      doris-net:
+        ipv4_address: 172.20.0.3
+
+networks:
+  doris-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16 

@@ -35,28 +35,38 @@ type TokenConfig struct {
 }
 
 type BlockScanner struct {
-	logger      *zap.Logger
-	db          *gorm.DB
-	config      *Config
-	tokenConfig *TokenConfig
-	client      *tron.Client
-	wg          sync.WaitGroup
-	stopChan    chan struct{}
+	logger        *zap.Logger
+	db            *gorm.DB
+	config        *Config
+	tokenConfig   *TokenConfig
+	client        *tron.Client
+	wg            sync.WaitGroup
+	stopChan      chan struct{}
+	progressStore *storage.ProgressStore // 进度存储
 }
 
-func NewBlockScanner(logger *zap.Logger, db *gorm.DB, config *Config, tokenConfig *TokenConfig) *BlockScanner {
+func NewBlockScanner(logger *zap.Logger, db *gorm.DB, config *Config, tokenConfig *TokenConfig, progressStore *storage.ProgressStore) *BlockScanner {
 	return &BlockScanner{
-		logger:      logger,
-		db:          db,
-		config:      config,
-		tokenConfig: tokenConfig,
-		client:      tron.NewClient(config.NodeURL),
-		stopChan:    make(chan struct{}),
+		logger:        logger,
+		db:            db,
+		config:        config,
+		tokenConfig:   tokenConfig,
+		client:        tron.NewClient(config.NodeURL),
+		stopChan:      make(chan struct{}),
+		progressStore: progressStore,
 	}
 }
 
 func (s *BlockScanner) Start(ctx context.Context) error {
 	s.logger.Info("Starting block scanner", zap.Int64("from_block", s.config.StartBlock))
+
+	// 启动时从进度存储读取断点
+	if s.progressStore != nil {
+		if progress, err := s.progressStore.GetProgress(ctx, s.config.Chain); err == nil && progress > 0 {
+			s.config.StartBlock = progress
+			s.logger.Info("Resuming from saved progress", zap.Int64("block", progress))
+		}
+	}
 
 	// 创建任务通道
 	taskChan := make(chan int64, s.config.ConcurrentWorkers)
@@ -156,38 +166,6 @@ func batchInsertTransactions(db *gorm.DB, txs []*storage.Transaction) error {
 	return db.Create(&txs).Error
 }
 
-// 分批批量插入方法：每批 batchSize 条
-func bulkInsertTransactionsInBatches(db *gorm.DB, txs []*storage.Transaction, batchSize int) error {
-	total := len(txs)
-	for i := 0; i < total; i += batchSize {
-		end := i + batchSize
-		if end > total {
-			end = total
-		}
-		batch := txs[i:end]
-		if err := db.Create(&batch).Error; err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// 分批批量插入 TronUsdtTransaction
-func bulkInsertTronUsdtTransactionsInBatches(db *gorm.DB, txs []*storage.TronUsdtTransaction, batchSize int) error {
-	total := len(txs)
-	for i := 0; i < total; i += batchSize {
-		end := i + batchSize
-		if end > total {
-			end = total
-		}
-		batch := txs[i:end]
-		if err := db.Create(&batch).Error; err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 // fetchBlockAndLogs 获取指定区块的区块数据和日志，并返回 logIndexMap 及区块时间戳。
 func (s *BlockScanner) fetchBlockAndLogs(ctx context.Context, blockNum int64) (*tron.TronBlock, map[string][]int32, time.Time, error) {
 	// 获取区块数据，带重试
@@ -208,7 +186,7 @@ func (s *BlockScanner) fetchBlockAndLogs(ctx context.Context, blockNum int64) (*
 		return nil, nil, time.Time{}, fmt.Errorf("failed to get block after %d attempts: %v", s.config.RetryTimes, err)
 	}
 
-	timestamp := time.Unix(tron.HexToInt64(block.Timestamp), 0)
+	timestamp := time.Unix(utils.HexToInt64(block.Timestamp), 0)
 
 	// 获取本区块所有log，建立tx_hash到log_index的映射
 	filter := map[string]interface{}{
@@ -234,39 +212,6 @@ func (s *BlockScanner) fetchBlockAndLogs(ctx context.Context, blockNum int64) (*
 	return block, logIndexMap, timestamp, nil
 }
 
-// TxConvertParams 用于聚合链上交易转换为数据库模型所需的所有参数。
-type TxConvertParams struct {
-	Tx          tron.Transaction
-	LogIndexMap map[string][]int32
-	Block       *tron.TronBlock
-	Timestamp   time.Time
-}
-
-// parseTrc20Transfer 负责解析和校验 TRC20 transfer 交易，返回标准化后的 from、to、amount，失败返回 error。
-func (s *BlockScanner) parseTrc20Transfer(tx tron.Transaction, logIndexMap map[string][]int32) (from, to string, amount *big.Int, logIndex int32, err error) {
-	if !strings.HasPrefix(tx.Input, "0xa9059cbb") {
-		return "", "", nil, 0, fmt.Errorf("not a TRC20 transfer method")
-	}
-	if !utils.IsTargetContract(tx.To, s.tokenConfig.ContractAddress, "tron") {
-		return "", "", nil, 0, fmt.Errorf("not target contract")
-	}
-	fromAddr, toAddr, amt, err := tron.ParseTRC20Transfer(tx.Input)
-	if err != nil {
-		return "", "", nil, 0, err
-	}
-	if fromAddr == "" {
-		fromAddr = utils.NormalizeAddress(tx.From, "tron")
-	} else {
-		fromAddr = utils.NormalizeAddress(fromAddr, "tron")
-	}
-	toAddr = utils.NormalizeAddress(toAddr, "tron")
-	if !tron.IsValidTronAddress(fromAddr) || !tron.IsValidTronAddress(toAddr) {
-		return "", "", nil, 0, fmt.Errorf("invalid address format: from=%s, to=%s", fromAddr, toAddr)
-	}
-	logIndex = utils.GetLogIndex(logIndexMap, tx.Hash)
-	return fromAddr, toAddr, amt, logIndex, nil
-}
-
 // parseTransactions 解析区块内所有链上交易，批量转换为数据库 Transaction 和 TronUsdtTransaction 记录。
 func (s *BlockScanner) parseTransactions(block *tron.TronBlock, logIndexMap map[string][]int32, timestamp time.Time) ([]*storage.Transaction, []*storage.TronUsdtTransaction) {
 	var txRecords []*storage.Transaction
@@ -290,66 +235,13 @@ func (s *BlockScanner) parseTransactions(block *tron.TronBlock, logIndexMap map[
 	return txRecords, tronRecords
 }
 
-// convertToDBRecords 将一笔链上交易转换为一条 Transaction 记录和两条 TronUsdtTransaction 记录（出账/入账）。
-// 不满足条件时返回 nil, nil。
-func (s *BlockScanner) convertToDBRecords(params TxConvertParams) (*storage.Transaction, []*storage.TronUsdtTransaction) {
-	tx := params.Tx
-	logIndexMap := params.LogIndexMap
-	block := params.Block
-	timestamp := params.Timestamp
-
-	from, to, amount, logIndex, err := s.parseTrc20Transfer(tx, logIndexMap)
-	if err != nil {
-		// 不是TRC20转账或校验失败直接跳过
-		return nil, nil
-	}
-	adjustedAmount := utils.AdjustAmount(amount, s.tokenConfig.Decimals)
-	blockNum := tron.HexToInt64(block.Number)
-	txRecord := &storage.Transaction{
-		Chain:           s.config.Chain,
-		ContractAddress: s.tokenConfig.ContractAddress,
-		TokenSymbol:     s.tokenConfig.Symbol,
-		Block:           blockNum,
-		LogIndex:        logIndex,
-		TxHash:          tx.Hash,
-		FromAddress:     from,
-		ToAddress:       to,
-		Amount:          adjustedAmount.Int64(),
-		Timestamp:       timestamp,
-	}
-	tronPair := []*storage.TronUsdtTransaction{
-		{
-			OwnAddress:          from,
-			Timestamp:           timestamp,
-			CounterpartyAddress: to,
-			Amount:              adjustedAmount.Int64(),
-			Block:               blockNum,
-			LogIndex:            logIndex,
-			TxHash:              tx.Hash,
-			Direction:           1, // 出账
-		},
-		{
-			OwnAddress:          to,
-			Timestamp:           timestamp,
-			CounterpartyAddress: from,
-			Amount:              adjustedAmount.Int64(),
-			Block:               blockNum,
-			LogIndex:            logIndex,
-			TxHash:              tx.Hash,
-			Direction:           0, // 进账
-		},
-	}
-	return txRecord, tronPair
-}
-
 // batchInsertAll 分批批量插入所有交易和双向记录到数据库。
 func (s *BlockScanner) batchInsertAll(txRecords []*storage.Transaction, tronRecords []*storage.TronUsdtTransaction, blockNum int64) error {
-	const batchSize = 500
-	if err := bulkInsertTransactionsInBatches(s.db, txRecords, batchSize); err != nil {
+	if err := bulkInsertTransactionsInBatches(s.db, txRecords, s.config.Chain, s.tokenConfig.Symbol, blockNum, s.logger); err != nil {
 		s.logger.Error("Failed to batch insert transactions", zap.Int64("block", blockNum), zap.Error(err))
 		return err
 	}
-	if err := bulkInsertTronUsdtTransactionsInBatches(s.db, tronRecords, batchSize); err != nil {
+	if err := bulkInsertTronUsdtTransactionsInBatches(s.db, tronRecords, s.config.Chain, s.tokenConfig.Symbol, blockNum, s.logger); err != nil {
 		s.logger.Error("Failed to batch insert tron_usdt_transactions", zap.Int64("block", blockNum), zap.Error(err))
 		return err
 	}
@@ -367,5 +259,12 @@ func (s *BlockScanner) processBlock(ctx context.Context, blockNum int64) error {
 		return err
 	}
 	s.logger.Info("Block processed with batch insert", zap.Int64("block", blockNum), zap.Int("tx_count", len(txRecords)), zap.Int("tron_record_count", len(tronRecords)))
+
+	// 处理成功后保存进度到 Redis
+	if s.progressStore != nil {
+		if err := s.progressStore.SaveProgress(ctx, s.config.Chain, blockNum); err != nil {
+			s.logger.Warn("Failed to save progress", zap.Error(err))
+		}
+	}
 	return nil
 }
